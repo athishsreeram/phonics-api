@@ -10,6 +10,8 @@ const cors     = require('cors');
 const morgan   = require('morgan');
 
 const { initDB }          = require('./db/init');
+
+const usersRouter = require('./routes/users'); 
 const storiesRouter       = require('./routes/stories');
 const eventsRouter        = require('./routes/events');
 const emailsRouter        = require('./routes/emails');
@@ -64,6 +66,8 @@ app.use('/api/events',        eventsRouter);
 app.use('/api/emails',        emailsRouter);
 app.use('/api/admin',         adminRouter);
 app.use('/api/subscriptions', subscriptionsRouter);
+app.use('/api/users', usersRouter);
+ 
 
 // 404 handler
 app.use((_req, res) => {
