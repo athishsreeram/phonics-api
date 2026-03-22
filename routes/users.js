@@ -12,33 +12,41 @@ const { query, useMemory, memDB, getMemNextId } = require('../db/init');
 const router = express.Router();
 
 // POST /api/users/register
-// Called by phonics-app when a parent signs up (before Stripe checkout)
+// Single call from onboarding — writes to BOTH users + email_leads tables.
 router.post('/register', async (req, res) => {
   const { email, child_name, child_age } = req.body;
   if (!email) return res.status(400).json({ error: 'email is required' });
 
   try {
     if (useMemory()) {
+      // Write to users
       const existing = memDB.users.find(u => u.email === email);
       if (existing) {
-        // Update last_seen and child info if provided
         if (child_name) existing.child_name = child_name;
         if (child_age)  existing.child_age  = child_age;
         existing.last_seen = new Date().toISOString();
-        return res.json({ ok: true, data: existing, created: false });
+      } else {
+        memDB.users.push({
+          id: getMemNextId('users'),
+          email, child_name, child_age,
+          status: 'free',
+          created_at: new Date().toISOString(),
+          last_seen:  new Date().toISOString(),
+        });
       }
-      const user = {
-        id: getMemNextId('users'),
-        email, child_name, child_age,
-        status: 'free',
-        created_at: new Date().toISOString(),
-        last_seen:  new Date().toISOString(),
-      };
-      memDB.users.push(user);
-      return res.status(201).json({ ok: true, data: user, created: true });
+      // Write to email_leads
+      if (!memDB.emails.find(e => e.email === email)) {
+        memDB.emails.push({
+          id: getMemNextId('emails'),
+          email, name: child_name || null, source: 'onboarding',
+          created_at: new Date().toISOString(),
+        });
+      }
+      const user = memDB.users.find(u => u.email === email);
+      return res.status(201).json({ ok: true, data: user });
     }
 
-    // Upsert: insert or update last_seen + child info
+    // 1. Upsert into users table
     const { rows } = await query(
       `INSERT INTO users (email, child_name, child_age, status)
        VALUES ($1, $2, $3, 'free')
@@ -49,8 +57,17 @@ router.post('/register', async (req, res) => {
        RETURNING id, email, child_name, child_age, status, created_at, last_seen`,
       [email, child_name || null, child_age || null]
     );
+
+    // 2. Upsert into email_leads table (same transaction, ON CONFLICT DO NOTHING)
+    await query(
+      `INSERT INTO email_leads (email, name, source)
+       VALUES ($1, $2, 'onboarding')
+       ON CONFLICT (email) DO NOTHING`,
+      [email, child_name || null]
+    );
+
     const created = rows[0].created_at > new Date(Date.now() - 2000).toISOString();
-    res.status(created ? 201 : 200).json({ ok: true, data: rows[0], created });
+    res.status(created ? 201 : 200).json({ ok: true, data: rows[0] });
   } catch (err) {
     console.error('[users.register]', err.message);
     res.status(500).json({ error: 'Failed to register user' });
