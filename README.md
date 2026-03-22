@@ -1,302 +1,174 @@
-# Phonics Hub — Split Architecture Setup Guide
+# phonics-api-fixed
 
-## Overview
-
-Three separate projects, each deployed independently:
+Production-ready backend for the Phonics Hub 3-app system.
 
 ```
-phonics-api/      → Node.js + Express + PostgreSQL  →  Render / Railway
-phonics-app/      → Static HTML/JS                  →  Vercel (phonics77-app.vercel.app)
-phonics-admin/    → Static HTML/JS                  →  Vercel (phonics-admin.vercel.app)
-```
-
-Data flow:
-```
-User plays phonics-app
-       ↓  HTTP POST (fire-and-forget)
-  phonics-api  ←→  PostgreSQL (Neon)
-       ↑  JWT-protected GET
-Admin views phonics-admin
+phonics77-app (Vercel)     →  reads stories, logs events
+phonics-admin (GitHub Pages) →  manages stories, views analytics
+phonics-api   (Render)      →  single source of truth  ← this repo
 ```
 
 ---
 
-## STEP 1 — Set up PostgreSQL (Neon — free tier)
-
-1. Go to https://neon.tech and create a free account
-2. Create a new project → name it `phonics-hub`
-3. Copy the **Connection string** — looks like:
-   ```
-   postgresql://user:password@ep-xxx.us-east-2.aws.neon.tech/neondb?sslmode=require
-   ```
-4. Save this — you'll need it in Step 2
-
----
-
-## STEP 2 — Deploy the API (Render — free tier)
-
-### 2a. Push phonics-api to GitHub
+## Quick Start (local)
 
 ```bash
-cd phonics-api
-git init
-git add .
-git commit -m "initial"
-gh repo create phonics-api --private --push
-# or: git remote add origin https://github.com/YOUR_USER/phonics-api && git push -u origin main
-```
-
-### 2b. Deploy on Render
-
-1. Go to https://render.com → New → Web Service
-2. Connect your `phonics-api` GitHub repo
-3. Settings:
-   - **Build command:** `npm install`
-   - **Start command:** `node server.js`
-   - **Environment:** Node
-   - **Plan:** Free (or Starter $7/mo for always-on)
-
-### 2c. Add environment variables in Render dashboard
-
-Go to your service → Environment → Add these:
-
-| Key | Value |
-|-----|-------|
-| `DATABASE_URL` | your Neon connection string from Step 1 |
-| `JWT_SECRET` | any long random string (e.g. run `openssl rand -hex 32`) |
-| `ADMIN_EMAIL` | startdreamhere123@gmail.com |
-| `ADMIN_PASSWORD` | choose a strong password |
-| `STRIPE_SECRET_KEY` | sk_live_... from Stripe Dashboard |
-| `STRIPE_PRICE_ID` | price_... from Stripe Dashboard |
-| `STRIPE_WEBHOOK_SECRET` | whsec_... (set up in Step 3) |
-| `ALLOWED_ORIGINS` | https://phonics77-app.vercel.app,https://phonics-admin.vercel.app |
-| `NODE_ENV` | production |
-
-### 2d. Run database migration
-
-After deploy, open Render Shell (or run locally with the DATABASE_URL set):
-
-```bash
-# In Render Shell or locally:
-node migrate.js
-```
-
-You should see: `✅ All tables created successfully`
-
-### 2e. Note your API URL
-
-After deploy, Render gives you a URL like:
-```
-https://phonics-api.onrender.com
-```
-Save this — you'll need it in Steps 4 and 5.
-
----
-
-## STEP 3 — Set up Stripe Webhook
-
-1. Go to https://dashboard.stripe.com/webhooks → Add endpoint
-2. **Endpoint URL:** `https://phonics-api.onrender.com/api/subscriptions/webhook`
-3. **Events to listen for:**
-   - `customer.subscription.created`
-   - `customer.subscription.updated`
-   - `customer.subscription.deleted`
-4. Copy the **Signing secret** (starts with `whsec_`)
-5. Add it as `STRIPE_WEBHOOK_SECRET` in Render environment variables
-6. Redeploy (Render → Manual Deploy)
-
----
-
-## STEP 4 — Update API URL in both front-end apps
-
-### phonics-app/js/config.js
-```js
-window.PHONICS_API_BASE = 'https://phonics-api.onrender.com'; // ← your Render URL
-```
-
-### phonics-admin/js/config.js
-```js
-window.PHONICS_API_BASE = 'https://phonics-api.onrender.com'; // ← same
-```
-
----
-
-## STEP 5 — Deploy phonics-app to Vercel
-
-```bash
-cd phonics-app
-npx vercel --prod
-# When prompted:
-#   Project name: phonics77-app (or your existing project name)
-#   Output directory: .  (just press Enter)
-```
-
-Or push to GitHub and Vercel will auto-deploy.
-
-**Verify:** open https://phonics77-app.vercel.app and play an activity.
-Check Render logs — you should see the event arrive:
-```
-POST /api/events 200
-```
-
----
-
-## STEP 6 — Deploy phonics-admin to Vercel
-
-```bash
-cd phonics-admin
-npx vercel --prod
-# Project name: phonics-admin (new project)
-# Output directory: .
-```
-
-**After deploy:**
-1. Open https://phonics-admin.vercel.app
-2. Log in with the ADMIN_EMAIL and ADMIN_PASSWORD you set in Render
-3. You should see your dashboard with live data
-
----
-
-## Local Development
-
-### Run API locally
-
-```bash
-cd phonics-api
 cp .env.example .env
-# Edit .env with your DATABASE_URL and other values
+# Edit .env — add DATABASE_URL (Neon) or leave blank for in-memory mode
+
 npm install
-node migrate.js          # first time only
-npm run dev              # starts on http://localhost:3001
+node src/db/migrate-standalone.js   # first time only, skip if no DB
+npm run dev                          # starts on http://localhost:3001
 ```
 
-### Run phonics-app locally
+Verify:
+```bash
+curl http://localhost:3001/health
+# → {"ok":true,"ts":"...","env":"development"}
+```
+
+---
+
+## Environment Variables
+
+| Key | Required | Description |
+|-----|----------|-------------|
+| `DATABASE_URL` | Optional | Neon PostgreSQL connection string. Omit to use in-memory fallback. |
+| `JWT_SECRET` | Yes | Long random string. `openssl rand -hex 32` |
+| `ADMIN_EMAIL` | Yes | Login email for App 2 (phonics-admin) |
+| `ADMIN_PASSWORD` | Yes | Login password for App 2 |
+| `ALLOWED_ORIGINS` | Yes | Comma-separated frontend URLs (no trailing slash) |
+| `STRIPE_SECRET_KEY` | No | Stripe payments |
+| `STRIPE_PRICE_ID` | No | Stripe subscription price |
+| `STRIPE_WEBHOOK_SECRET` | No | Stripe webhook signing secret |
+
+**Render deploy:** paste all env vars in Render → Your Service → Environment.
+
+---
+
+## API Reference
+
+### Public endpoints (no auth)
+
+| Method | Path | Used by |
+|--------|------|---------|
+| GET | `/health` | monitoring |
+| GET | `/api/stories` | App 1 — load story list |
+| GET | `/api/stories/:id` | App 1 — load single story |
+| POST | `/api/events` | App 1 — log analytics event |
+| POST | `/api/emails` | App 1 — capture email lead |
+| POST | `/api/subscriptions/checkout` | App 1 — Stripe checkout |
+| GET | `/api/subscriptions/verify` | App 1 — verify payment |
+
+### Admin endpoints (JWT required)
+
+| Method | Path | Used by |
+|--------|------|---------|
+| POST | `/api/admin/login` | App 2 — get token |
+| GET | `/api/admin/overview` | App 2 — KPIs |
+| GET | `/api/admin/users` | App 2 — user list |
+| GET | `/api/admin/events` | App 2 — event log |
+| GET | `/api/admin/emails` | App 2 — leads |
+| GET | `/api/admin/timeseries?days=30` | App 2 — chart data |
+| POST | `/api/stories` | App 2 — create story |
+| PUT | `/api/stories/:id` | App 2 — update story |
+| DELETE | `/api/stories/:id` | App 2 — delete story |
+
+---
+
+## Curl Tests
 
 ```bash
-cd phonics-app
-# Edit js/config.js to point to localhost:
-#   window.PHONICS_API_BASE = 'http://localhost:3001';
-npx serve . -p 3000
-# Open http://localhost:3000
-```
+# Test live API
+bash test/curl-tests.sh
 
-### Run admin locally
+# Test local
+API=http://localhost:3001 bash test/curl-tests.sh
 
-```bash
-cd phonics-admin
-# Edit js/config.js to point to localhost:
-#   window.PHONICS_API_BASE = 'http://localhost:3001';
-npx serve . -p 4000
-# Open http://localhost:4000
+# With your real admin password
+ADMIN_PASSWORD=yourpass bash test/curl-tests.sh
 ```
 
 ---
 
-## Testing the full flow
+## App Integration
 
-```bash
-# 1. Confirm API is running
-curl https://phonics-api.onrender.com/health
-# → {"ok":true,"ts":"...","env":"production"}
+### App 1 — phonics77-app
 
-# 2. Send a test event
-curl -X POST https://phonics-api.onrender.com/api/events \
-  -H "Content-Type: application/json" \
-  -d '{"type":"page_view","session":"test123","url":"/index.html","ua":"desktop","premium":false,"ts":1234567890}'
-# → {"ok":true}
+1. Copy `integration/app1/config.js` → `phonics77-app/js/config.js`
+2. Copy `integration/app1/stories-loader.js` → `phonics77-app/js/stories-loader.js`
+3. In `story.html`, replace hardcoded story content with:
+   ```html
+   <div id="story-container"></div>
+   <script src="js/config.js"></script>
+   <script src="js/stories-loader.js"></script>
+   ```
+4. To link to a specific story: `story.html?id=2`
 
-# 3. Log into admin dashboard
-# POST https://phonics-api.onrender.com/api/admin/login
-# body: {"email":"your@email.com","password":"yourpassword"}
-# → {"token":"eyJ..."}
+### App 2 — phonics-admin
 
-# 4. Check overview (replace TOKEN)
-curl -H "Authorization: Bearer TOKEN" \
-  https://phonics-api.onrender.com/api/admin/overview
-# → full JSON with users, events, subscriptions
+1. Copy `integration/app2/stories-admin.js` → `phonics-admin/js/stories-admin.js`
+2. Add to admin `index.html`:
+   ```html
+   <section id="stories-section">
+     <h2>📖 Stories</h2>
+     <button onclick="StoriesAdmin.showCreateForm()">+ New Story</button>
+     <div id="stories-form" style="display:none"></div>
+     <div id="stories-list"></div>
+   </section>
+   <script src="js/config.js"></script>
+   <script src="js/stories-admin.js"></script>
+   ```
+3. The script auto-loads stories on page load.
+   JWT token must be in `localStorage` as `phonics_admin_token` (already handled by your existing login flow).
+
+---
+
+## Folder Structure
+
+```
+phonics-api-fixed/
+├── src/
+│   ├── server.js                 ← entry point
+│   ├── db/
+│   │   ├── init.js               ← pg + in-memory fallback
+│   │   └── migrate-standalone.js ← run once: node src/db/migrate-standalone.js
+│   ├── routes/
+│   │   ├── stories.js
+│   │   ├── events.js
+│   │   ├── emails.js
+│   │   ├── admin.js
+│   │   └── subscriptions.js
+│   ├── controllers/
+│   │   └── stories.js
+│   └── middleware/
+│       └── auth.js
+├── integration/
+│   ├── app1/
+│   │   ├── config.js             ← copy to phonics77-app/js/
+│   │   └── stories-loader.js     ← copy to phonics77-app/js/
+│   └── app2/
+│       └── stories-admin.js      ← copy to phonics-admin/js/
+├── test/
+│   ├── curl-tests.sh             ← bash test/curl-tests.sh
+│   └── sample-data.json          ← reference payloads
+├── .env.example
+├── package.json
+└── README.md
 ```
 
 ---
 
-## Architecture diagram
+## In-Memory Fallback
 
-```
-┌─────────────────────┐     ┌──────────────────────────────────────┐
-│   phonics-app        │     │           phonics-api                │
-│   (Vercel)           │     │           (Render)                   │
-│                      │     │                                      │
-│  js/analytics.js ────┼────►│  POST /api/events    → events table  │
-│  js/payment.js   ────┼────►│  POST /api/emails    → email_leads   │
-│  pages/success.html ─┼────►│  GET  /api/subscriptions/verify      │
-│  js/config.js        │     │  POST /api/subscriptions/checkout    │
-│  (API_BASE URL) ─────┘     │  POST /api/subscriptions/webhook     │
-└─────────────────────┘      │         ↕                            │
-                              │     PostgreSQL (Neon)                │
-┌─────────────────────┐      │   users, events, activity_progress   │
-│   phonics-admin      │      │   email_leads, subscriptions, streaks│
-│   (Vercel)           │      └──────────────────────────────────────┘
-│                      │               ▲
-│  index.html ─────────┼── JWT ────────┘
-│  js/config.js        │  GET /api/admin/overview
-│  (API_BASE URL)      │  GET /api/admin/users
-└─────────────────────┘  GET /api/admin/events
-                          GET /api/admin/emails
-                          GET /api/admin/timeseries
-```
+If `DATABASE_URL` is not set, the API uses an in-memory store seeded with 3 sample stories. All CRUD works — data is lost on server restart. Good for staging/testing.
 
 ---
 
-## API Endpoints Reference
+## Deploying to Render
 
-### Public (called by phonics-app — no auth)
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/events` | Log a behavior event |
-| POST | `/api/emails` | Capture email lead |
-| POST | `/api/subscriptions/checkout` | Create Stripe checkout session |
-| GET  | `/api/subscriptions/verify?session_id=cs_...` | Verify payment |
-| POST | `/api/subscriptions/webhook` | Stripe webhook (raw body) |
-
-### Admin (called by phonics-admin — JWT required)
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/admin/login` | Get JWT token |
-| GET  | `/api/admin/overview` | Full KPI summary |
-| GET  | `/api/admin/users` | User list |
-| GET  | `/api/admin/events` | Event log |
-| GET  | `/api/admin/emails` | Email leads |
-| GET  | `/api/admin/timeseries?days=30` | Time series data |
-
----
-
-## Adding Mailchimp (optional)
-
-In `phonics-api/routes/emails.js`, uncomment the Mailchimp block and add to Render env:
-
-```
-MAILCHIMP_API_KEY=abc123-us1
-MAILCHIMP_LIST_ID=your_list_id
-```
-
----
-
-## Troubleshooting
-
-**Events not arriving in database:**
-- Check CORS: `ALLOWED_ORIGINS` must include your phonics app URL exactly
-- Check `window.PHONICS_API_BASE` in `js/config.js` matches your Render URL
-- Open browser DevTools → Network tab → look for POST to `/api/events`
-
-**Admin login failing:**
-- Confirm `ADMIN_EMAIL` and `ADMIN_PASSWORD` in Render env vars
-- Check `JWT_SECRET` is set (any non-empty string)
-
-**Stripe webhook failing:**
-- Confirm webhook URL is `https://your-api.onrender.com/api/subscriptions/webhook`
-- Confirm `STRIPE_WEBHOOK_SECRET` matches the signing secret in Stripe dashboard
-- Note: Render free tier sleeps after 15min — use Starter ($7/mo) for reliable webhooks
-
-**Render free tier cold starts:**
-- Free tier sleeps after 15min of inactivity, taking ~30s to wake
-- For production: upgrade to Starter ($7/mo) or use Railway ($5/mo)
-- Alternative: use Vercel serverless functions (convert routes to /api/*.js)
+1. Push this repo to GitHub
+2. Render → New Web Service → connect repo
+3. Build: `npm install` / Start: `node src/server.js`
+4. Add all env vars from `.env.example`
+5. After first deploy: open Render Shell → `node src/db/migrate-standalone.js`

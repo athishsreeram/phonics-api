@@ -1,0 +1,67 @@
+{
+  "_comment": "Sample payloads for manual curl testing — copy-paste ready",
+
+  "story_create": {
+    "title": "The Frog on the Log",
+    "content": "A frog sat on a log. The log was in a bog. The frog had a dog. The dog jumped off the log.",
+    "level": 2,
+    "emoji": "🐸",
+    "words": ["frog", "log", "bog", "dog", "jumped"]
+  },
+
+  "story_update": {
+    "title": "The Frog on the Log (Revised)",
+    "level": 3
+  },
+
+  "event_page_view": {
+    "type": "page_view",
+    "session": "abc123",
+    "url": "/index.html",
+    "ua": "desktop",
+    "premium": false,
+    "ts": 1740000000
+  },
+
+  "event_activity_start": {
+    "type": "activity_start",
+    "session": "abc123",
+    "url": "/listen-choose.html",
+    "ua": "mobile",
+    "premium": false,
+    "ts": 1740000010,
+    "data": { "activity": "sound-matching" }
+  },
+
+  "event_activity_complete": {
+    "type": "activity_complete",
+    "session": "abc123",
+    "url": "/listen-choose.html",
+    "ua": "mobile",
+    "premium": false,
+    "ts": 1740000120,
+    "data": { "activity": "sound-matching", "score": 8, "total": 10, "duration_sec": 110 }
+  },
+
+  "email_lead": {
+    "email": "parent@example.com",
+    "name": "Jane Smith",
+    "source": "homepage_cta"
+  },
+
+  "admin_login": {
+    "email": "startdreamhere123@gmail.com",
+    "password": "your-admin-password"
+  },
+
+  "expected_responses": {
+    "health":      { "ok": true, "ts": "2026-03-22T12:00:00.000Z", "env": "production" },
+    "stories_list": { "ok": true, "data": [{ "id": 1, "title": "...", "level": 1 }] },
+    "story_single": { "ok": true, "data": { "id": 1, "title": "The Cat and the Hat", "level": 1, "emoji": "🐱" } },
+    "story_create": { "ok": true, "data": { "id": 4, "title": "The Frog on the Log" } },
+    "event_post":  { "ok": true },
+    "email_post":  { "ok": true },
+    "admin_login": { "ok": true, "token": "eyJhbGciOiJIUzI1NiIs..." },
+    "admin_overview": { "ok": true, "data": { "mrr": 0, "active_subs": 0, "total_stories": 3 } }
+  }
+}
