@@ -8,6 +8,7 @@
 API="${API:-https://phonics-api-k43i.onrender.com}"
 PASS=0; FAIL=0; TOKEN=""
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
+ADMIN_PASSWORD="athish123"
 
 pass() { echo -e "${GREEN}✅ PASS${NC} — $1"; ((PASS++)); }
 fail() { echo -e "${RED}❌ FAIL${NC} — $1\n   got: $(echo "$2" | head -c 150)"; ((FAIL++)); }

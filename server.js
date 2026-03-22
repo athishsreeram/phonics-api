@@ -1,39 +1,43 @@
 /**
  * phonics-api — server.js
- * Production-ready Express server
- * Stack: Node.js + Express + PostgreSQL (Neon) with in-memory fallback
+ * Single source of truth for all 3 apps.
+ * Stack: Node.js + Express + PostgreSQL (Neon) + in-memory fallback
  */
 
-const express = require('express');
-const cors = require('cors');
-const morgan = require('morgan');
+require('dotenv').config();
+const express  = require('express');
+const cors     = require('cors');
+const morgan   = require('morgan');
 
-const app = express();
+const { initDB }          = require('./db/init');
+const storiesRouter       = require('./routes/stories');
+const eventsRouter        = require('./routes/events');
+const emailsRouter        = require('./routes/emails');
+const adminRouter         = require('./routes/admin');
+const subscriptionsRouter = require('./routes/subscriptions');
+
+const app  = express();
 const PORT = process.env.PORT || 3001;
 
-// ─── CORS ───────────────────────────────────────────────────────────────────
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
+// ─── CORS ────────────────────────────────────────────────────────────────────
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
   .split(',')
   .map(o => o.trim())
   .filter(Boolean);
 
-// Always allow these regardless of env config
-const DEFAULT_ORIGINS = [
-  'https://phonics77-app.vercel.app',
-  'https://athishsreeram.github.io',
+// Always allow these for local dev
+allowedOrigins.push(
   'http://localhost:3000',
   'http://localhost:4000',
-  'http://localhost:8000',
-  'http://127.0.0.1:5500',
-];
-
-const allOrigins = [...new Set([...DEFAULT_ORIGINS, ...ALLOWED_ORIGINS])];
+  'http://localhost:5500',
+  'http://127.0.0.1:5500'
+);
 
 app.use(cors({
   origin: (origin, cb) => {
-    // Allow requests with no origin (curl, Postman, server-to-server)
+    // Allow no-origin requests (curl, Postman, server-to-server)
     if (!origin) return cb(null, true);
-    if (allOrigins.includes(origin)) return cb(null, true);
+    if (allowedOrigins.includes(origin)) return cb(null, true);
     console.warn(`[CORS] Blocked origin: ${origin}`);
     cb(new Error(`CORS: origin ${origin} not allowed`));
   },
@@ -43,49 +47,47 @@ app.use(cors({
 }));
 
 // ─── MIDDLEWARE ───────────────────────────────────────────────────────────────
+app.use(morgan(':method :url :status :res[content-length] - :response-time ms'));
+
+// Raw body for Stripe webhook MUST come before json()
+app.use('/api/subscriptions/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json());
-app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
+app.use(express.urlencoded({ extended: true }));
 
-// ─── DB ───────────────────────────────────────────────────────────────────────
-const db = require('./src/db');
-
-// ─── ROUTES ──────────────────────────────────────────────────────────────────
-const storiesRouter = require('./routes/stories');
-const adminRouter = require('./routes/admin');
-const eventsRouter = require('./routes/events');
-
-app.use('/stories', storiesRouter);
-app.use('/api/admin', adminRouter);
-app.use('/api/events', eventsRouter);
-
-// ─── HEALTH ──────────────────────────────────────────────────────────────────
-app.get('/health', (req, res) => {
-  res.json({
-    ok: true,
-    ts: new Date().toISOString(),
-    env: process.env.NODE_ENV || 'development',
-    db: db.mode,
-  });
+// ─── ROUTES ───────────────────────────────────────────────────────────────────
+app.get('/health', (_req, res) => {
+  res.json({ ok: true, ts: new Date().toISOString(), env: process.env.NODE_ENV || 'development' });
 });
 
-// ─── 404 ─────────────────────────────────────────────────────────────────────
-app.use((req, res) => {
-  res.status(404).json({ ok: false, error: `Route not found: ${req.method} ${req.path}` });
+app.use('/api/stories',       storiesRouter);
+app.use('/api/events',        eventsRouter);
+app.use('/api/emails',        emailsRouter);
+app.use('/api/admin',         adminRouter);
+app.use('/api/subscriptions', subscriptionsRouter);
+
+// 404 handler
+app.use((_req, res) => {
+  res.status(404).json({ error: 'Route not found' });
 });
 
-// ─── ERROR HANDLER ────────────────────────────────────────────────────────────
-app.use((err, req, res, _next) => {
+// Global error handler
+app.use((err, _req, res, _next) => {
   console.error('[ERROR]', err.message);
-  const status = err.status || 500;
-  res.status(status).json({ ok: false, error: err.message });
+  if (err.message.startsWith('CORS:')) {
+    return res.status(403).json({ error: err.message });
+  }
+  res.status(500).json({ error: 'Internal server error', detail: err.message });
 });
 
-// ─── BOOT ────────────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`\n🚀 phonics-api running on port ${PORT}`);
-  console.log(`   DB mode  : ${db.mode}`);
-  console.log(`   Env      : ${process.env.NODE_ENV || 'development'}`);
-  console.log(`   Origins  : ${allOrigins.join(', ')}\n`);
-});
-
-module.exports = app;
+// ─── BOOT ─────────────────────────────────────────────────────────────────────
+(async () => {
+  try {
+    await initDB();
+    app.listen(PORT, () => {
+      console.log(`✅ phonics-api listening on port ${PORT} [${process.env.NODE_ENV || 'development'}]`);
+    });
+  } catch (err) {
+    console.error('Failed to start server:', err);
+    process.exit(1);
+  }
+})();
