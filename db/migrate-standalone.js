@@ -35,6 +35,17 @@ const SQL = `
     ('The Sun and the Rain',3,'☀️','The sun came out after the rain. Jane waited in the lane.',ARRAY['sun','rain','lane'],TRUE)
   ) AS v(title,level,emoji,content,words,active)
   WHERE NOT EXISTS (SELECT 1 FROM stories LIMIT 1);
+
+  ALTER TABLE subscriptions
+  ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+
+  CREATE TABLE IF NOT EXISTS processed_sessions (
+    stripe_session_id TEXT PRIMARY KEY,
+    processed_at      TIMESTAMPTZ DEFAULT NOW()
+  );
+
+  ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT;
 `;
 
 (async () => {
