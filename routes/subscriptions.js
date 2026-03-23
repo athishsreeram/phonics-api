@@ -36,11 +36,13 @@ router.post('/checkout', async (req, res) => {
 
 // GET /api/subscriptions/verify?session_id=cs_xxx&email=optional
 // Verifies Stripe session AND writes to subscriptions + users tables.
-// Never returns 500 — always returns ok:true with active flag so frontend
-// can grant premium even if Stripe config is incomplete.
+// Now with comprehensive error handling and database fixes.
 router.get('/verify', async (req, res) => {
-  const { session_id, email: queryEmail } = req.query;
-  if (!session_id) return res.status(400).json({ error: 'session_id required' });
+  const { session_id, queryEmail } = req.query;
+  
+  if (!session_id) {
+    return res.status(400).json({ error: 'session_id required' });
+  }
 
   const stripeKey = process.env.STRIPE_SECRET_KEY;
 
@@ -59,107 +61,243 @@ router.get('/verify', async (req, res) => {
   try {
     const stripe = require('stripe')(stripeKey);
 
-    // Retrieve session — try with subscription expand, fall back without
+    // Retrieve session with expanded subscription
     let session;
     try {
       session = await stripe.checkout.sessions.retrieve(session_id, {
-        expand: ['subscription'],
+        expand: ['subscription', 'customer'],
       });
     } catch (expandErr) {
-      // expand failed — try plain retrieve
       console.warn('[subscriptions.verify] expand failed, retrying plain:', expandErr.message);
       session = await stripe.checkout.sessions.retrieve(session_id);
     }
 
-    // Determine active state — trial counts as active for access purposes
+    // Determine active state
     const paymentStatus = session.payment_status;
-    const subStatus     = session.subscription?.status || null;
-    const active = paymentStatus === 'paid'         ||
+    const subStatus = session.subscription?.status || null;
+    const active = paymentStatus === 'paid' ||
                    paymentStatus === 'no_payment_required' ||
-                   subStatus === 'active'           ||
+                   subStatus === 'active' ||
                    subStatus === 'trialing';
 
-    const email       = session.customer_details?.email || queryEmail || null;
+    // Get email from multiple sources
+    const email = session.customer_details?.email || 
+                  session.customer?.email || 
+                  queryEmail || 
+                  null;
+    
     const stripeSubId = session.subscription?.id || null;
-    const dbStatus    = subStatus || (active ? 'trialing' : 'unpaid');
+    const stripeCustomerId = session.customer?.id || session.customer_details?.id || null;
+    const dbStatus = subStatus || (active ? 'trialing' : 'unpaid');
 
-    // ── Write to DB ───────────────────────────────────────────────────────────
+    console.log('[subscriptions.verify] Stripe session data:', {
+      session_id,
+      email,
+      active,
+      dbStatus,
+      stripeSubId,
+      stripeCustomerId,
+      paymentStatus,
+      subStatus
+    });
+
+    // ── Write to DB with comprehensive error handling ──
+    let userId = null;
+    let subscriptionRecord = null;
+
     if (email) {
       try {
+        console.log('[subscriptions.verify] Attempting to write to DB for email:', email);
+        
         if (useMemory()) {
+          // Memory DB logic (fallback for development)
           const { memDB } = require('../db/init');
           let user = memDB.users.find(u => u.email === email);
+          
           if (user) {
             if (active) user.status = dbStatus;
+            userId = user.id;
+            console.log('[subscriptions.verify] Updated existing user in memory:', { userId, email });
           } else {
-            user = { id: Date.now(), email, status: active ? dbStatus : 'free',
-                     created_at: new Date().toISOString(), last_seen: new Date().toISOString() };
+            userId = Date.now();
+            user = { 
+              id: userId, 
+              email, 
+              status: active ? dbStatus : 'free',
+              created_at: new Date().toISOString(), 
+              last_seen: new Date().toISOString() 
+            };
             memDB.users.push(user);
+            console.log('[subscriptions.verify] Created new user in memory:', { userId, email });
           }
-          // Also write to email_leads
+          
+          // Add to email_leads if not exists
           if (!memDB.emails.find(e => e.email === email)) {
-            memDB.emails.push({ id: Date.now()+1, email, name: null,
-                                source: 'stripe_checkout', created_at: new Date().toISOString() });
+            memDB.emails.push({ 
+              id: Date.now() + 1, 
+              email, 
+              name: null,
+              source: 'stripe_checkout', 
+              created_at: new Date().toISOString() 
+            });
           }
+          
+          // Add subscription in memory
+          subscriptionRecord = {
+            id: Date.now() + 2,
+            user_id: userId,
+            stripe_session_id: session_id,
+            stripe_sub_id: stripeSubId,
+            stripe_customer_id: stripeCustomerId,
+            status: dbStatus,
+            plan: 'monthly',
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          };
+          memDB.subscriptions = memDB.subscriptions || [];
+          memDB.subscriptions.push(subscriptionRecord);
+          
         } else {
-          // 1. Upsert user with subscription status
-          const { rows: userRows } = await query(
-            `INSERT INTO users (email, status)
-             VALUES ($1, $2)
+          // ── PostgreSQL (Neon) with proper error handling ──
+          
+          // Step 1: Ensure user exists and get/update their record
+          const userResult = await query(
+            `INSERT INTO users (email, status, created_at, last_seen)
+             VALUES ($1, $2, NOW(), NOW())
              ON CONFLICT (email) DO UPDATE SET
-               status    = CASE WHEN $2 IN ('active','trialing') THEN $2 ELSE users.status END,
-               last_seen = NOW()
-             RETURNING id`,
+               last_seen = NOW(),
+               status = CASE 
+                 WHEN $2 IN ('active', 'trialing') THEN $2 
+                 ELSE users.status 
+               END
+             RETURNING id, email, status, created_at`,
             [email, dbStatus]
           );
+          
+          if (!userResult.rows || userResult.rows.length === 0) {
+            throw new Error(`Failed to create/update user for email: ${email}`);
+          }
+          
+          userId = userResult.rows[0].id;
+          console.log('[subscriptions.verify] User operation successful:', { 
+            userId, 
+            email, 
+            status: userResult.rows[0].status 
+          });
 
-          const userId = userRows[0]?.id || null;
-
-          // 2. Also write to email_leads (idempotent)
-          await query(
-            `INSERT INTO email_leads (email, source)
-             VALUES ($1, 'stripe_checkout')
-             ON CONFLICT (email) DO NOTHING`,
-            [email]
-          );
-
-          // 3. Upsert subscription row
-          if (userId && active) {
+          // Step 2: Add to email_leads (idempotent, don't block if fails)
+          try {
             await query(
-              `INSERT INTO subscriptions (user_id, stripe_session_id, stripe_sub_id, status, plan)
-               VALUES ($1, $2, $3, $4, 'monthly')
-               ON CONFLICT (stripe_session_id) DO UPDATE SET
-                 status        = EXCLUDED.status,
-                 stripe_sub_id = COALESCE(EXCLUDED.stripe_sub_id, subscriptions.stripe_sub_id),
-                 updated_at    = NOW()`,
-              [userId, session_id, stripeSubId, dbStatus]
+              `INSERT INTO email_leads (email, source, created_at)
+               VALUES ($1, 'stripe_checkout', NOW())
+               ON CONFLICT (email) DO UPDATE SET
+                 source = EXCLUDED.source,
+                 updated_at = NOW()`,
+              [email]
             );
+            console.log('[subscriptions.verify] Email lead added/updated for:', email);
+          } catch (leadErr) {
+            console.warn('[subscriptions.verify] Email lead insert failed (non-critical):', leadErr.message);
+          }
+
+          // Step 3: Insert or update subscription
+          if (active) {
+            const subscriptionResult = await query(
+              `INSERT INTO subscriptions (
+                user_id, 
+                stripe_session_id, 
+                stripe_sub_id, 
+                stripe_customer_id, 
+                status, 
+                plan, 
+                created_at, 
+                updated_at,
+                expires_at
+              )
+              VALUES ($1, $2, $3, $4, $5, 'monthly', NOW(), NOW(), 
+                CASE 
+                  WHEN $5 = 'active' THEN NOW() + INTERVAL '30 days'
+                  WHEN $5 = 'trialing' THEN NOW() + INTERVAL '7 days'
+                  ELSE NULL
+                END
+              )
+              ON CONFLICT (stripe_session_id) DO UPDATE SET
+                status = EXCLUDED.status,
+                stripe_sub_id = COALESCE(EXCLUDED.stripe_sub_id, subscriptions.stripe_sub_id),
+                stripe_customer_id = COALESCE(EXCLUDED.stripe_customer_id, subscriptions.stripe_customer_id),
+                updated_at = NOW(),
+                expires_at = CASE 
+                  WHEN EXCLUDED.status IN ('active', 'trialing') 
+                  THEN NOW() + INTERVAL '30 days'
+                  ELSE subscriptions.expires_at
+                END
+              RETURNING id, user_id, stripe_session_id, status, stripe_sub_id`,
+              [userId, session_id, stripeSubId, stripeCustomerId, dbStatus]
+            );
+            
+            subscriptionRecord = subscriptionResult.rows[0];
+            console.log('[subscriptions.verify] Subscription operation successful:', subscriptionRecord);
+          } else {
+            console.log('[subscriptions.verify] Subscription not active, skipping insert:', { userId, active, dbStatus });
           }
         }
 
-        console.log(`[subscriptions.verify] ✅ ${email} → ${dbStatus} | session: ${session_id}`);
+        console.log(`[subscriptions.verify] ✅ Database write complete for ${email} → ${dbStatus} | session: ${session_id}`);
+        
       } catch (dbErr) {
-        // DB write failed — still return success to client so premium unlocks
-        console.error('[subscriptions.verify] DB write failed (non-fatal):', dbErr.message);
+        // Log detailed error but don't throw - we still want to return success to client
+        console.error('[subscriptions.verify] ❌ Database write failed (non-fatal):', {
+          message: dbErr.message,
+          stack: dbErr.stack,
+          code: dbErr.code,
+          detail: dbErr.detail,
+          table: dbErr.table,
+          constraint: dbErr.constraint
+        });
+        
+        // Check for specific errors
+        if (dbErr.code === '23503') { // Foreign key violation
+          console.error('[subscriptions.verify] Foreign key violation - user might not exist properly');
+        } else if (dbErr.code === '42P01') { // Table doesn't exist
+          console.error('[subscriptions.verify] Table doesn\'t exist - check your database schema');
+        } else if (dbErr.code === '23505') { // Unique violation
+          console.error('[subscriptions.verify] Unique violation - duplicate key');
+        }
       }
+    } else {
+      console.log('[subscriptions.verify] No email found in session or query, skipping DB write');
     }
 
+    // ── Return response with subscription status ──
     res.json({
-      ok:       true,
+      ok: true,
       active,
-      status:   dbStatus,
-      email:    email || null,
+      status: dbStatus,
+      email: email || null,
+      userId: userId,
+      subscriptionId: subscriptionRecord?.id || null,
+      stripeSubscriptionId: stripeSubId,
       customer: session.customer_details || (email ? { email } : null),
+      timestamp: new Date().toISOString()
     });
+    
   } catch (err) {
-    // Never 500 — always grant optimistically so premium unlocks
-    console.error('[subscriptions.verify]', err.message);
+    // Never return 500 - always grant optimistically so premium unlocks
+    console.error('[subscriptions.verify] ❌ Fatal error:', {
+      message: err.message,
+      stack: err.stack,
+      session_id
+    });
+    
+    // Return optimistic grant so frontend can still unlock premium
     res.json({
-      ok:     true,
+      ok: true,
       active: true,
       status: 'active',
-      email:  queryEmail || null,
-      note:   'verify error — optimistic grant',
+      email: queryEmail || null,
+      note: 'verify error — optimistic grant',
+      error: process.env.NODE_ENV === 'development' ? err.message : undefined,
+      timestamp: new Date().toISOString()
     });
   }
 });
